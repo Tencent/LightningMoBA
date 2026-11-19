@@ -1,0 +1,26 @@
+name: CUDA and block8 regression
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner-label:
+        description: Self-hosted SM90 runner with CUDA-enabled PyTorch and a matching toolkit
+        required: true
+        type: string
+        default: sm90
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: [self-hosted, linux, x64, "${{ inputs.runner-label }}"]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install package and test dependencies
+        run: python -m pip install --no-build-isolation -e '.[test]'
+      - name: Run Python contracts and CUDA regressions
+        run: make test PYTHON=python

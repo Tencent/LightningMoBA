@@ -1,0 +1,64 @@
+name: Build LightningMoBA wheels
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs-on:
+        description: Hosted Linux runner
+        required: true
+        type: choice
+        options:
+          - ubuntu-22.04
+          - ubuntu-24.04
+        default: ubuntu-22.04
+      python-version:
+        description: Python version
+        required: true
+        type: string
+      cuda-version:
+        description: CUDA toolkit version, for example 12.6.3
+        required: true
+        type: string
+      torch-version:
+        description: Stable PyTorch version, for example 2.8.0
+        required: true
+        type: string
+      torch-cuda-version:
+        description: PyTorch CUDA wheel channel, for example cu126
+        required: true
+        type: string
+      cxx11_abi:
+        description: Force C++11 ABI; FALSE keeps the installed PyTorch ABI
+        required: true
+        type: choice
+        options:
+          - "FALSE"
+          - "TRUE"
+        default: "FALSE"
+      upload-to-release:
+        description: Upload the checked wheel to an existing release
+        required: false
+        type: boolean
+        default: false
+      release-version:
+        description: Release tag to build; empty builds the selected workflow commit
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-wheels:
+    permissions:
+      contents: write
+    uses: ./.github/workflows/_build.yml
+    with:
+      runs-on: ${{ inputs.runs-on }}
+      python-version: ${{ inputs.python-version }}
+      cuda-version: ${{ inputs.cuda-version }}
+      torch-version: ${{ inputs.torch-version }}
+      torch-cuda-version: ${{ inputs.torch-cuda-version }}
+      cxx11_abi: ${{ inputs.cxx11_abi }}
+      upload-to-release: ${{ inputs.upload-to-release }}
+      release-version: ${{ inputs.release-version }}

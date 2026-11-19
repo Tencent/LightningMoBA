@@ -1,0 +1,41 @@
+*.ncu-rep
+.DS_store
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+# Compiled artifacts
+*.so
+*.o
+*.a
+*.pyd
+
+# Test and profiling caches
+.pytest_cache/
+.ruff_cache/
+*.nsys-rep
+*.nsys-rep.sqlite
+*.trace.json
+
+# Distribution / packaging
+bin/
+build/
+develop-eggs/
+dist/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+.eggs/
+
+# IDE-related
+.idea/
+
+# Dev
+venv

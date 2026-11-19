@@ -1,0 +1,31 @@
+recursive-include csrc *.cu
+recursive-include csrc *.h
+recursive-include csrc *.cuh
+recursive-include csrc *.cpp
+recursive-include csrc *.hpp
+recursive-include csrc *.py
+
+recursive-include lightning_moba *.cu
+recursive-include lightning_moba *.h
+recursive-include lightning_moba *.cuh
+recursive-include lightning_moba *.cpp
+recursive-include lightning_moba *.hpp
+include lightning_moba_dynamic_cuda.py
+include csrc/cutlass/LICENSE.txt
+include csrc/cutlass/EULA.txt
+
+include LICENSE
+include README.md
+include Makefile
+include assets/lightning_moba_overview.png
+include examples/block8_attention.py
+include tests/test_block8_migration.py
+include tests/test_block8_extension.py
+include tests/test_block8_numerics.py
+include tests/test_public_interface.py
+include tests/test_topk_correctness.py
+include pytest.ini
+
+prune build
+prune dist
+global-exclude __pycache__ *.py[cod] *.so *.o *.a *.pyd *.ncu-rep *.nsys-rep *.trace.json

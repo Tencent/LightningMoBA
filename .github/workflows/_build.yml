@@ -1,0 +1,203 @@
+name: Build LightningMoBA wheel template
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        required: true
+        type: string
+      python-version:
+        required: true
+        type: string
+      cuda-version:
+        required: true
+        type: string
+      torch-version:
+        required: true
+        type: string
+      torch-cuda-version:
+        required: true
+        type: string
+      cxx11_abi:
+        required: true
+        type: string
+      upload-to-release:
+        required: false
+        type: boolean
+        default: false
+      release-version:
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -e -u -o pipefail {0}
+
+jobs:
+  build-wheel:
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 350
+    permissions:
+      contents: read
+    env:
+      PYTHON_VERSION: ${{ inputs.python-version }}
+      CUDA_VERSION: ${{ inputs.cuda-version }}
+      TORCH_VERSION: ${{ inputs.torch-version }}
+      TORCH_CUDA_VERSION: ${{ inputs.torch-cuda-version }}
+      CXX11_ABI: ${{ inputs.cxx11_abi }}
+      RELEASE_VERSION: ${{ inputs.release-version }}
+      UPLOAD_TO_RELEASE: ${{ inputs.upload-to-release }}
+      MAX_JOBS: "1"
+      NVCC_THREADS: "2"
+    steps:
+      - name: Validate build inputs
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+
+          patterns = {
+              "PYTHON_VERSION": r"3\.[0-9]+(?:\.[0-9]+)?",
+              "CUDA_VERSION": r"[0-9]+\.[0-9]+\.[0-9]+",
+              "TORCH_VERSION": r"[0-9]+\.[0-9]+\.[0-9]+",
+              "TORCH_CUDA_VERSION": r"cu[0-9]{3}",
+              "CXX11_ABI": r"TRUE|FALSE",
+          }
+          for key, pattern in patterns.items():
+              if re.fullmatch(pattern, os.environ[key]) is None:
+                  raise SystemExit(f"Invalid {key}")
+          tag = os.environ["RELEASE_VERSION"]
+          if tag and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", tag) is None:
+              raise SystemExit("Invalid release tag")
+          if os.environ["UPLOAD_TO_RELEASE"] == "true" and not tag:
+              raise SystemExit("Publishing requires an existing release tag")
+          PY
+
+      - name: Checkout selected source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release-version || github.sha }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Configure swap on hosted runners
+        if: ${{ inputs.runs-on == 'ubuntu-22.04' || inputs.runs-on == 'ubuntu-24.04' }}
+        uses: pierotofy/set-swap-space@v1.0
+        with:
+          swap-size-gb: 10
+
+      - name: Install CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.26
+        with:
+          cuda: ${{ inputs.cuda-version }}
+          method: network
+          linux-local-args: '["--toolkit"]'
+          sub-packages: '["nvcc"]'
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install "setuptools==75.8.0" ninja packaging wheel psutil twine pytest einops
+          python -m pip install "torch==$TORCH_VERSION" --index-url "https://download.pytorch.org/whl/$TORCH_CUDA_VERSION"
+          nvcc --version
+          python --version
+          python - <<'PY'
+          import os
+          import torch
+
+          if torch.version.cuda is None:
+              raise SystemExit("A CUDA-enabled PyTorch build is required")
+          channel = "cu" + "".join(torch.version.cuda.split(".")[:2])
+          if channel != os.environ["TORCH_CUDA_VERSION"]:
+              raise SystemExit("Installed PyTorch CUDA does not match the requested wheel channel")
+          installed_abi = bool(torch._C._GLIBCXX_USE_CXX11_ABI)
+          if os.environ["CXX11_ABI"] == "TRUE" and not installed_abi:
+              raise SystemExit("Use a C++11-ABI PyTorch build rather than overriding an incompatible ABI")
+          abi = "true" if installed_abi else "false"
+          local_version = f"{channel}torch{os.environ['TORCH_VERSION']}cxx11abi{abi}"
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              output.write(f"LIGHTNING_MOBA_LOCAL_VERSION={local_version}\n")
+          print(f"PyTorch {torch.__version__}, CUDA {torch.version.cuda}, C++11 ABI {abi}")
+          PY
+
+      - name: Build wheel
+        env:
+          LIGHTNING_MOBA_FORCE_CXX11_ABI: ${{ inputs.cxx11_abi }}
+        run: |
+          timeout 5h python setup.py bdist_wheel --dist-dir=dist
+
+      - name: Check wheel contents and metadata
+        run: |
+          python -m twine check dist/*.whl
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile
+
+          wheels = list(Path("dist").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit("Expected exactly one wheel")
+          with zipfile.ZipFile(wheels[0]) as wheel:
+              names = wheel.namelist()
+              required = {
+                  "lightning_moba/__init__.py",
+                  "lightning_moba/lightning_moba_interface.py",
+                  "lightning_moba_dynamic_cuda.py",
+                  "lightning_moba/block8/interface.py",
+                  "lightning_moba/block8/routing.py",
+                  "lightning_moba/block8/cuda.py",
+                  "lightning_moba/_compat.py",
+              }
+              missing = required.difference(names)
+              if missing:
+                  raise SystemExit(f"Missing wheel files: {sorted(missing)}")
+              if not any(name.startswith("lightning_moba_cuda.") and name.endswith(".so") for name in names):
+                  raise SystemExit("Renamed CUDA extension is missing")
+              for filename in ("LICENSE", "LICENSE.txt", "EULA.txt"):
+                  if not any(".dist-info/" in name and name.endswith("/" + filename) for name in names):
+                      raise SystemExit(f"Missing license: {filename}")
+              if any(name.startswith(("flash_moba/", "flash_moba_cuda.", "flash_moba_dynamic_cuda.py")) for name in names):
+                  raise SystemExit("Legacy package or binary found in wheel")
+          print(wheels[0].name)
+          PY
+
+      - name: Test installed wheel Python contracts
+        run: |
+          python -m pip install --no-deps dist/*.whl
+          cd "$RUNNER_TEMP"
+          python -m pytest -q "$GITHUB_WORKSPACE/tests/test_public_interface.py" -m "not cuda"
+
+      - name: Save checked wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: lightning-moba-wheel
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish-wheel:
+    if: ${{ inputs.upload-to-release }}
+    needs: build-wheel
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_VERSION: ${{ inputs.release-version }}
+    steps:
+      - name: Download checked wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: lightning-moba-wheel
+          path: dist
+
+      - name: Upload to existing release
+        run: |
+          gh release view "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" > /dev/null
+          gh release upload "$RELEASE_VERSION" dist/*.whl --repo "$GITHUB_REPOSITORY"
