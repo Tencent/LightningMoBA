@@ -299,4 +299,4 @@ If you use LightningMoBA in your research, please cite our [paper](https://arxiv
 
 ## License
 
-Copyright (C) 2026 Tencent. LightningMoBA is licensed under the BSD-3-Clause license. See [LICENSE](LICENSE) for the full terms. Third-party components remain subject to their respective licenses, including the bundled [CUTLASS license](csrc/cutlass/LICENSE.txt) and [EULA](csrc/cutlass/EULA.txt).
+Copyright (C) 2026 Tencent. LightningMoBA is licensed under the BSD-3-Clause [LICENSE](LICENSE).
