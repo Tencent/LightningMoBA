@@ -193,4 +193,4 @@ LightningMoBA builds on FlashMoBA and [FlashAttention](https://github.com/Dao-AI
 
 ## License
 
-Copyright (C) 2026 Tencent. LightningMoBA is licensed under the BSD-3-Clause license. See [LICENSE](LICENSE) for the full terms. Third-party components remain subject to their respective licenses, including the bundled [CUTLASS license](csrc/cutlass/LICENSE.txt) and [EULA](csrc/cutlass/EULA.txt).
+Copyright (C) 2026 Tencent. LightningMoBA is licensed under the BSD-3-Clause [LICENSE](LICENSE).
