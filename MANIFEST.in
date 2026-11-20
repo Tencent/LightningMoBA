@@ -19,10 +19,14 @@ include README.md
 include Makefile
 include assets/lightning_moba_overview.png
 include examples/block8_attention.py
+include examples/selector_attention.py
+include benchmarks/bench_routing_sweep.py
 include tests/test_block8_migration.py
 include tests/test_block8_extension.py
 include tests/test_block8_numerics.py
 include tests/test_public_interface.py
+include tests/test_default_pipeline.py
+include tests/test_routing_sweep.py
 include tests/test_topk_correctness.py
 include pytest.ini
 

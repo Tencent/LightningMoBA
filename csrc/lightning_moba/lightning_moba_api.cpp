@@ -25,7 +25,7 @@
 #include "lightning_moba_static_switch.h"
 #include "flash_combine_kernel.h"
 #include "flash_kvcentric_worklist.h"
-#include "flash_sm90_phase4b_csc_pipe.h"
+#include "sm90_kv_centric_pipeline.h"
 
 #define CHECK_DEVICE(x) TORCH_CHECK(x.is_cuda(), #x " must be on CUDA")
 #define CHECK_SHAPE(x, ...) TORCH_CHECK(x.sizes() == torch::IntArrayRef({__VA_ARGS__}), #x " must have shape (" #__VA_ARGS__ ")")
@@ -65,8 +65,8 @@ bool use_kvcentric_input_partial_dtype(at::ScalarType q_dtype) {
     return false;
 }
 
-// Phase 4-B production bridge. Keep the new pipeline behind an exact opt-in
-// until the complete 64K/128K TopK=16 validation matrix is accepted.
+// Compatibility switch for the legacy KV-centric entry point.
+// The default dynamic-threshold API invokes the SM90 pipeline directly.
 bool use_kvcentric_sm90_phase4b_csc_pipe_float2_overlap_chunk128() {
     const char* value = std::getenv("LIGHTNING_MOBA_KVCENTRIC_SM90_K1");
     return value != nullptr &&
@@ -741,9 +741,9 @@ moba_varlen_fwd_kvcentric(
         TORCH_CHECK(q.is_contiguous() && k.is_contiguous() && v.is_contiguous(),
                     "WGMMA CSC strict modes require contiguous packed Q/K/V");
         TORCH_CHECK(n_lg_block_dim == 128,
-                    "W2SR attribution CSC WGMMA requires fixed chunk128 K columns");
+                    "SM90 KV-centric pipeline requires fixed chunk128 K columns");
         TORCH_CHECK(is_causal,
-                    "Phase 4-B CSC overlap mode currently requires is_causal=true");
+                    "SM90 KV-centric pipeline requires is_causal=true");
     }
 
     CHECK_SHAPE(q, total_q, num_heads, head_size);
@@ -754,9 +754,8 @@ moba_varlen_fwd_kvcentric(
     CHECK_SHAPE(moba_col_offsets, batch_size, num_heads, max_lg_col_num);
     CHECK_SHAPE(moba_col_nnz, batch_size, num_heads, max_lg_col_num);
 
-    // Return before the legacy partial-buffer allocation below. Phase 4-B
-    // allocates and fully writes its own CSC-contiguous outputs; allocating a
-    // second 34/69 GiB output at 64K/128K would make this bridge unusable.
+    // The SM90 pipeline allocates and writes its own CSC-contiguous partials.
+    // Return here to avoid allocating the legacy partial buffers as well.
     if (use_phase4b_csc_pipe_float2_overlap) {
         auto [o, lse] = moba_sm90_phase4b_csc_pipe(
             q, k, v, moba_col_offsets, moba_col_nnz, moba_row_indices,

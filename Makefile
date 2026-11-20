@@ -1,12 +1,16 @@
 PYTHON ?= python3
 ARTIFACTS ?= dist/*
 
-.PHONY: clean_dist create_dist check_dist upload_package test test-cpu test-block8 test-topk
+.PHONY: clean_dist create_dist check_dist upload_package test test-cpu test-block8 test-topk test-default
 
-test: test-cpu test-block8 test-topk
+test: test-cpu test-default test-block8 test-topk
 
 test-cpu:
-	$(PYTHON) -m pytest -q tests/test_public_interface.py -m "not cuda"
+	$(PYTHON) -m pytest -q tests/test_public_interface.py tests/test_default_pipeline.py tests/test_routing_sweep.py -m "not cuda"
+
+test-default:
+	$(PYTHON) -c 'import torch; assert torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0), "test-default requires an SM90 GPU"'
+	$(PYTHON) -m pytest -q tests/test_default_pipeline.py -m cuda
 
 test-block8:
 	$(PYTHON) -c 'import torch; assert torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0), "test-block8 requires an SM90 GPU"'

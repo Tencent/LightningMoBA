@@ -41,6 +41,29 @@ def test_attention_default_matches_native_lower_bound():
     assert defaults['lg_block_m'].default == 128
 
 
+def test_default_entry_requires_alpha_and_exports_explicit_baseline():
+    parameters = inspect.signature(lightning_moba.lightning_moba_varlen_func).parameters
+    assert parameters['alpha'].kind == inspect.Parameter.KEYWORD_ONLY
+    assert parameters['alpha'].default is inspect.Parameter.empty
+    assert 'moba_topk' not in parameters
+    assert parameters['moba_chunk_size'].default == 128
+    assert callable(lightning_moba.lightning_moba_topk_varlen_func)
+
+
+def test_block128_routing_is_public():
+    for name in (
+        'flash_dynamic_mean_pool',
+        'flash_cuda_dynamic_relative_threshold_compact_varlen_func',
+        'flash_cuda_dynamic_relative_threshold_padded_varlen_func',
+        'flash_cuda_compact_csc_qcsr_from_bitmask',
+    ):
+        assert callable(getattr(lightning_moba, name))
+    parameters = inspect.signature(lightning_moba.lightning_moba_cuda_kv_centric_func).parameters
+    assert parameters['topk'].default is None
+    assert parameters['backend'].kind == inspect.Parameter.KEYWORD_ONLY
+    assert 'q_offsets' in parameters and 'q_csc' in parameters
+
+
 @pytest.mark.parametrize('value', [.1, -1., float('nan'), float('inf')])
 def test_unsupported_hybrid_is_rejected_before_dispatch(value):
     with pytest.raises(NotImplementedError, match='hybrid_lambda'):

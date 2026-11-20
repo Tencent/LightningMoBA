@@ -3,7 +3,7 @@ Peak memory analysis of LightningMoBA components.
 
 This script measures the peak memory usage of three different attention implementations:
 1. Flash Attention (Baseline)
-2. LightningMoBA (Our efficient implementation)
+2. LightningMoBA's explicit Top-K/query-centric baseline (not the default pipeline)
 3. MoBA (Official implementation)
 
 The goal is to compare the memory footprint of these methods under various configurations.
@@ -24,7 +24,7 @@ import math
 
 # from flash_attn import flash_attn_varlen_func
 from flash_attn import flash_attn_varlen_func
-from lightning_moba import lightning_moba_varlen_func
+from lightning_moba import lightning_moba_topk_varlen_func
 
 try:
     from moba.moba_efficient import moba_attn_varlen
@@ -131,7 +131,7 @@ def test_moba_peak_memory(batch, seqlen, head, head_dim, moba_chunk_size, moba_t
     
     # Warmup
     for _ in range(warmup_iters):
-        o = lightning_moba_varlen_func(q, k, v, cu_seqlen, cu_seqlen, max_seqlen, max_seqlen, 
+        o = lightning_moba_topk_varlen_func(q, k, v, cu_seqlen, cu_seqlen, max_seqlen, max_seqlen,
                                         moba_chunk_size,
                                         moba_topk,
                                         causal=True)
@@ -143,7 +143,7 @@ def test_moba_peak_memory(batch, seqlen, head, head_dim, moba_chunk_size, moba_t
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
     for _ in range(test_iters):
-        o = lightning_moba_varlen_func(q, k, v, cu_seqlen, cu_seqlen, max_seqlen, max_seqlen, 
+        o = lightning_moba_topk_varlen_func(q, k, v, cu_seqlen, cu_seqlen, max_seqlen, max_seqlen,
                                         moba_chunk_size,
                                         moba_topk,
                                         causal=True)

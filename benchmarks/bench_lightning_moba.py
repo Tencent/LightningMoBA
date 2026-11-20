@@ -11,7 +11,7 @@ from einops import rearrange, repeat
 from lightning_moba.utils.benchmark import benchmark_all, benchmark_forward, benchmark_backward
 from lightning_moba.utils.benchmark import benchmark_fwd_bwd, benchmark_combined
 
-from lightning_moba import lightning_moba_varlen_func
+from lightning_moba import lightning_moba_topk_varlen_func
 from flash_attn import flash_attn_varlen_func
 from lightning_moba.moba_test_utils import (
     generate_moba_sparse_mask_topk,
@@ -77,7 +77,7 @@ top_k = 8
 lg_block_n = 128
 print(f"lg_block_n = {lg_block_n}, top_k = {top_k}")
 
-methods = (["LightningMoba", "Flash2"])
+methods = (["TopK-query-centric", "Flash2"])
 
 time_f = {}
 time_b = {}
@@ -111,7 +111,7 @@ for causal in causal_vals:
             # lg_block_m = decide_lg_block_m(top_k, lg_block_n, seqlen, causal)
             
             f, b = time_fwd_bwd(
-                lightning_moba_varlen_func, 
+                lightning_moba_topk_varlen_func,
                 q, k, v, 
                 cu_seqlens, cu_seqlens, 
                 max_seqlen, max_seqlen, 
@@ -120,8 +120,8 @@ for causal in causal_vals:
                 repeats=repeats, 
                 verbose=False
             )
-            time_f[config, "LightningMoba"] = f
-            time_b[config, "LightningMoba"] = b
+            time_f[config, "TopK-query-centric"] = f
+            time_b[config, "TopK-query-centric"] = b
             
             qkv = qkv.detach().requires_grad_(True)
             q, k, v = qkv.unbind(dim=2)

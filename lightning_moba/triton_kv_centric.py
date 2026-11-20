@@ -595,22 +595,82 @@ def lightning_moba_cuda_kv_centric_func(
     col_nnz: torch.Tensor,
     indices: torch.Tensor,
     chunk_size: int,
-    topk: int,
+    topk: Optional[int] = None,
     causal: bool = True,
     softmax_scale: Optional[float] = None,
     q2col_offsets: Optional[torch.Tensor] = None,
     q2col_valid: Optional[torch.Tensor] = None,
     use_cuda_combine: bool = True,
     graph_workspace: Optional[KvCentricGraphWorkspace] = None,
+    *,
+    backend: str = "legacy",
+    q_offsets: Optional[torch.Tensor] = None,
+    q_csc: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """CUDA KV-centric K1 plus Triton K2 combine.
+    """Consume CSC metadata with an explicit execution backend.
 
-    This is the production-oriented path used by the E2E integration. It keeps
-    LightningMoBA topk/sort unchanged and replaces only the sparse attention
-    kernel direction.
+    ``backend='sm90'`` accepts variable-cardinality compact CSC and Q-CSR
+    produced by the relative selector's fused builder. It directly executes
+    the SM90 pipeline and variable-NNZ combine; do not provide a Top-K budget.
+    Metadata must come from the corresponding builder for these Q/K inputs.
+
+    ``backend='legacy'`` preserves the Top-K wrapper, including its automatic
+    streaming dispatch. The two backends never silently fall back to each other.
     """
     import lightning_moba_cuda as lightning_moba_gpu
 
+    if backend not in ("legacy", "sm90"):
+        raise ValueError("backend must be 'legacy' or 'sm90'")
+    if backend == "sm90":
+        if topk is not None or q2col_offsets is not None or q2col_valid is not None or graph_workspace is not None:
+            raise ValueError("SM90 dynamic attention uses variable Q-CSR, not Top-K capacity or a legacy graph workspace")
+        if chunk_size != 128 or causal is not True or not use_cuda_combine:
+            raise ValueError("SM90 dynamic attention requires chunk_size=128, causal=True and CUDA combine")
+        if q_offsets is None or q_csc is None:
+            raise ValueError("SM90 dynamic attention requires q_offsets and q_csc from the fused CSC/Q-CSR builder")
+        if any(t.ndim != 3 for t in (q, k, v)) or k.shape != v.shape:
+            raise ValueError("expected packed rank-3 Q/K/V with matching K/V")
+        if any(t.requires_grad for t in (q, k, v)):
+            raise ValueError("SM90 dynamic attention is inference-only")
+        tensors = (q, k, v, cu_seqlens_q, cu_seqlens_k, col_offsets, col_nnz, indices, q_offsets, q_csc)
+        if any(not t.is_cuda or t.device != q.device for t in tensors):
+            raise ValueError("all inputs must share one CUDA device")
+        if any(t.dtype != torch.bfloat16 or t.shape[2] != 128 for t in (q, k, v)):
+            raise ValueError("SM90 dynamic attention requires BF16 and head_dim=128")
+        if q.shape[1] < 1 or k.shape[1] < 1 or q.shape[1] % k.shape[1]:
+            raise ValueError("KV heads must divide query heads")
+        for tensor, dtype, ndim in (
+            (cu_seqlens_q, torch.int32, 1), (cu_seqlens_k, torch.int32, 1),
+            (col_offsets, torch.int64, 3), (col_nnz, torch.int32, 3),
+            (indices, torch.int32, 1), (q_offsets, torch.int64, 1), (q_csc, torch.int32, 1),
+        ):
+            if tensor.dtype != dtype or tensor.ndim != ndim or not tensor.is_contiguous():
+                raise ValueError("invalid CSC/Q-CSR metadata dtype, rank or contiguity")
+        if (col_offsets.shape != col_nnz.shape or cu_seqlens_q.numel() != cu_seqlens_k.numel()
+                or col_nnz.shape[:2] != (cu_seqlens_q.numel() - 1, q.shape[1])
+                or q_offsets.numel() != q.shape[0] * q.shape[1] + 1
+                or q_csc.numel() != indices.numel()):
+            raise ValueError("CSC/Q-CSR dimensions do not match Q and batch metadata")
+        with torch.cuda.device(q.device):
+            if torch.cuda.get_device_capability(q.device) != (9, 0):
+                raise ValueError("backend='sm90' requires SM90; no legacy fallback is performed")
+            for name in ("moba_sm90_phase4b_csc_pipe", "moba_combine_q_csr"):
+                if not hasattr(lightning_moba_gpu, name):
+                    raise RuntimeError(f"rebuild lightning_moba_cuda: missing {name}")
+            scale = q.shape[-1] ** -0.5 if softmax_scale is None else softmax_scale
+            q, k, v = (tensor.contiguous() for tensor in (q, k, v))
+            partial, lse = lightning_moba_gpu.moba_sm90_phase4b_csc_pipe(
+                q, k, v, col_offsets, col_nnz,
+                indices, cu_seqlens_q, cu_seqlens_k, True, scale,
+            )
+            return lightning_moba_gpu.moba_combine_q_csr(
+                partial, lse, q_offsets, q_csc, torch.empty_like(q),
+            )
+
+    if q_offsets is not None or q_csc is not None:
+        raise ValueError("variable Q-CSR metadata requires backend='sm90'")
+    if type(topk) is not int or topk <= 0:
+        raise ValueError("the legacy backend requires an explicit positive Top-K capacity")
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)
 

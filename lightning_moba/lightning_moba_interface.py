@@ -1,4 +1,6 @@
 from typing import Optional, Sequence, Tuple, Union
+from numbers import Real
+import math
 
 import torch
 import torch.nn as nn
@@ -854,11 +856,127 @@ def lightning_moba_varlen_func(
     cu_seqlens_k,
     max_seqlen_q,
     max_seqlen_k,
+    moba_chunk_size=128,
+    *,
+    alpha,
+    causal=True,
+    softmax_scale=None,
+    sink=1,
+    window=2,
+):
+    """Relative-threshold routing followed by the SM90 KV-centric pipeline.
+
+    Q/K/V use packed [tokens, heads, 128] BF16 layout on one SM90 device.
+    Each query sequence is positionally aligned with the corresponding K suffix.
+    Non-anchor blocks satisfy scaled_score >= scaled_row_max + log(alpha).
+    Alpha is a required scalar in (0, 1], not a Top-K budget. Sink/window
+    count 128-token blocks. There is no per-row cap or minimum-budget padding.
+
+    This inference-only, eager entry point explicitly calls the pipelined
+    CUDA kernel and variable-length Q-CSR combine, without environment-based
+    dispatch or fallback. Partial-output storage scales with selected pairs.
+    Use lightning_moba_topk_varlen_func for the Top-K/query-centric baseline.
+    """
+    if isinstance(alpha, bool) or not isinstance(alpha, Real) or not math.isfinite(alpha) or not 0 < alpha <= 1:
+        raise ValueError("alpha must be a finite scalar in (0, 1]")
+    if type(moba_chunk_size) is not int or moba_chunk_size != 128:
+        raise ValueError("the default SM90 pipeline requires moba_chunk_size=128")
+    if causal is not True:
+        raise ValueError("the default dynamic-threshold path is causal-only")
+    if type(sink) is not int or type(window) is not int or sink < 0 or window < 1:
+        raise ValueError("sink must be a nonnegative integer and window a positive integer")
+    if any(type(length) is not int or not 0 < length <= 2147483647
+           for length in (max_seqlen_q, max_seqlen_k)):
+        raise ValueError("maximum sequence lengths must be positive int32 integers")
+    if softmax_scale is None:
+        softmax_scale = 128 ** -0.5
+    if isinstance(softmax_scale, bool) or not isinstance(softmax_scale, Real) or not math.isfinite(softmax_scale) or softmax_scale <= 0:
+        raise ValueError("softmax_scale must be finite and positive")
+    if any(not isinstance(t, torch.Tensor) or t.ndim != 3 for t in (q, k, v)):
+        raise ValueError("expected packed rank-3 Q/K/V tensors")
+    if any(t.requires_grad for t in (q, k, v)):
+        raise ValueError("the default KV-centric pipeline is inference-only; use the explicit Top-K baseline for backward")
+    if any(not t.is_cuda or t.device != q.device for t in (q, k, v)):
+        raise ValueError("Q/K/V must share one CUDA device")
+    if any(t.dtype != torch.bfloat16 or t.shape[2] != 128 for t in (q, k, v)):
+        raise ValueError("the default SM90 pipeline requires BF16 and head_dim=128")
+    if k.shape != v.shape or q.shape[1] < 1 or k.shape[1] < 1 or q.shape[1] % k.shape[1]:
+        raise ValueError("K/V shapes must match and KV heads must divide query heads")
+    if q.shape[0] * q.shape[1] > 2147483647 or k.shape[0] > 2147483647:
+        raise ValueError("packed dimensions exceed the int32 indexing range")
+    for cu in (cu_seqlens_q, cu_seqlens_k):
+        if (not isinstance(cu, torch.Tensor) or cu.ndim != 1 or cu.dtype != torch.int32
+                or cu.device != q.device or not cu.is_contiguous()):
+            raise ValueError("cu_seqlens must be contiguous CUDA int32 vectors on the Q device")
+    if cu_seqlens_q.numel() != cu_seqlens_k.numel() or cu_seqlens_q.numel() < 2:
+        raise ValueError("Q/K cumulative lengths must describe the same nonempty batch")
+    with torch.cuda.device(q.device):
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("dynamic pattern construction is eager-only, not CUDA-graph-safe")
+        if torch.cuda.get_device_capability(q.device) != (9, 0):
+            raise ValueError("the default pipelined backend requires SM90; no baseline fallback is performed")
+        required = (
+            "moba_dynamic_relative_threshold_compact",
+            "moba_compact_csc_qcsr_from_bitmask",
+            "moba_sm90_phase4b_csc_pipe",
+            "moba_combine_q_csr",
+        )
+        missing = [name for name in required if not hasattr(lightning_moba_gpu, name)]
+        if missing:
+            raise RuntimeError(f"rebuild lightning_moba_cuda with the SM90 pipeline; missing: {', '.join(missing)}")
+        q_boundaries = cu_seqlens_q.cpu().tolist()
+        k_boundaries = cu_seqlens_k.cpu().tolist()
+        if (q_boundaries[0] != 0 or k_boundaries[0] != 0
+                or q_boundaries[-1] != q.shape[0] or k_boundaries[-1] != k.shape[0]):
+            raise ValueError("cumulative lengths must start at zero and end at the packed token counts")
+        for i in range(len(q_boundaries) - 1):
+            qlen = q_boundaries[i + 1] - q_boundaries[i]
+            klen = k_boundaries[i + 1] - k_boundaries[i]
+            if not 0 < qlen <= klen or qlen > max_seqlen_q or klen > max_seqlen_k:
+                raise ValueError("each sequence must satisfy 0 < query length <= key length and its maximum length")
+
+        from lightning_moba.triton_mean_pool import flash_dynamic_mean_pool
+        from lightning_moba.cuda_dynamic_threshold import (
+            flash_cuda_dynamic_relative_threshold_compact_varlen_func,
+            flash_cuda_compact_csc_qcsr_from_bitmask,
+        )
+
+        q, k, v = (t.contiguous() for t in (q, k, v))
+        km, cu_seqlens_km, _ = flash_dynamic_mean_pool(
+            k, cu_seqlens_k, max_seqlen_k, moba_chunk_size,
+        )
+        pattern = flash_cuda_dynamic_relative_threshold_compact_varlen_func(
+            q, km, cu_seqlens_q, cu_seqlens_k, cu_seqlens_km,
+            max_seqlen_q, max_seqlen_k, float(alpha), moba_chunk_size,
+            softmax_scale=float(softmax_scale), sink=sink, window=window,
+            causal=True, min_blocks_per_row=0, build_csc=False,
+        )
+        pattern, q_offsets, q_csc_indices = flash_cuda_compact_csc_qcsr_from_bitmask(
+            pattern, cu_seqlens_q, cu_seqlens_km,
+            max_seqlen_q, max_seqlen_k, moba_chunk_size,
+        )
+        o_partial, lse_partial = lightning_moba_gpu.moba_sm90_phase4b_csc_pipe(
+            q, k, v, pattern.col_offsets, pattern.col_nnz, pattern.csc_indices,
+            cu_seqlens_q, cu_seqlens_k, True, float(softmax_scale),
+        )
+        return lightning_moba_gpu.moba_combine_q_csr(
+            o_partial, lse_partial, q_offsets, q_csc_indices, torch.empty_like(q),
+        )
+
+
+def lightning_moba_topk_varlen_func(
+    q,
+    k,
+    v,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
     moba_chunk_size,
     moba_topk,
     causal=True,
 ):
-
+    """Explicit Top-K/query-centric baseline, including its backward path."""
     col_offsets, col_nnz, indices = flash_topk_varlen_func(
         q,
         k,

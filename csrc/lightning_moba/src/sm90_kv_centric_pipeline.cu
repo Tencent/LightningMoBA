@@ -2,7 +2,7 @@
  * Production SM90 KV-centric CSC attention pipeline.
  ******************************************************************************/
 
-#include "flash_sm90_phase4b_csc_pipe.h"
+#include "sm90_kv_centric_pipeline.h"
 
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -987,7 +987,7 @@ void launch(
         C10_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
             &active_blocks, kernel, kThreads, smem));
         TORCH_CHECK(active_blocks >= 2,
-                    "Phase4-B CSC pipeline must preserve two CTAs/SM; got ",
+                    "SM90 KV-centric CSC pipeline must preserve two CTAs/SM; got ",
                     active_blocks, " with dynamic smem=", smem, " bytes");
     }
     kernel<<<grid_size, kThreads, smem, stream>>>(
@@ -1016,14 +1016,19 @@ std::tuple<at::Tensor, at::Tensor> moba_sm90_phase4b_csc_pipe(
     const at::Tensor& q_rows, const at::Tensor& cu_seqlens_q,
     const at::Tensor& cu_seqlens_k, bool is_causal,
     double softmax_scale) {
+#if !defined(LIGHTNING_MOBA_SM90_PIPELINE_AVAILABLE)
+    TORCH_CHECK(false,
+                "SM90 pipeline was not enabled in this build; rebuild with "
+                "LIGHTNING_MOBA_CUDA_ARCHS=90a and CUDA 12.3 or newer");
+#endif
     at::cuda::CUDAGuard guard{q.device()};
-    TORCH_CHECK(is_causal, "Phase4-B CSC pipeline is causal-only");
+    TORCH_CHECK(is_causal, "SM90 KV-centric CSC pipeline is causal-only");
     TORCH_CHECK(q.is_cuda() && q.is_contiguous() && q.scalar_type() == at::kBFloat16 &&
                     q.dim() == 3 && q.size(2) == kHeadDim &&
                     k.is_cuda() && k.is_contiguous() && k.scalar_type() == at::kBFloat16 &&
                     v.is_cuda() && v.is_contiguous() && v.scalar_type() == at::kBFloat16 &&
                     k.sizes() == v.sizes() && k.dim() == 3 && k.size(2) == kHeadDim,
-                "Phase4-B requires contiguous CUDA BF16 packed Q/K/V with head_dim=128");
+                "SM90 KV-centric requires contiguous CUDA BF16 packed Q/K/V with head_dim=128");
     TORCH_CHECK(col_offsets.is_cuda() && col_offsets.is_contiguous() &&
                     col_offsets.scalar_type() == at::kLong && col_offsets.dim() == 3 &&
                     col_nnz.is_cuda() && col_nnz.is_contiguous() &&
@@ -1033,12 +1038,12 @@ std::tuple<at::Tensor, at::Tensor> moba_sm90_phase4b_csc_pipe(
                     cu_seqlens_q.scalar_type() == at::kInt && cu_seqlens_q.dim() == 1 &&
                     cu_seqlens_k.is_cuda() && cu_seqlens_k.is_contiguous() &&
                     cu_seqlens_k.scalar_type() == at::kInt && cu_seqlens_k.dim() == 1,
-                "Phase4-B requires contiguous CUDA CSC metadata");
+                "SM90 KV-centric requires contiguous CUDA CSC metadata");
     TORCH_CHECK(q.device() == k.device() && q.device() == v.device() &&
                     q.device() == col_offsets.device() && q.device() == col_nnz.device() &&
                     q.device() == q_rows.device() && q.device() == cu_seqlens_q.device() &&
                     q.device() == cu_seqlens_k.device(),
-                "Phase4-B inputs must share one CUDA device");
+                "SM90 KV-centric inputs must share one CUDA device");
     TORCH_CHECK(std::isfinite(softmax_scale) && softmax_scale > 0.0,
                 "softmax_scale must be finite and positive");
 
@@ -1052,9 +1057,9 @@ std::tuple<at::Tensor, at::Tensor> moba_sm90_phase4b_csc_pipe(
                     cu_seqlens_q.size(0) == batch_size + 1 &&
                     cu_seqlens_k.size(0) == batch_size + 1 && grid_size <= INT_MAX &&
                     q_rows.numel() <= INT_MAX,
-                "invalid Phase4-B CSC dimensions");
+                "invalid SM90 KV-centric CSC dimensions");
     const cudaDeviceProp* prop = at::cuda::getDeviceProperties(q.get_device());
-    TORCH_CHECK(prop->major >= 9, "Phase4-B CSC pipeline requires SM90+");
+    TORCH_CHECK(prop->major >= 9, "SM90 KV-centric CSC pipeline requires SM90+");
 
     const int64_t total_nnz = q_rows.numel();
     auto output = torch::empty({total_nnz, 128}, q.options().dtype(at::kFloat));
@@ -1071,7 +1076,7 @@ std::tuple<at::Tensor, at::Tensor> moba_sm90_phase4b_csc_pipe(
                 grid_size + (total_nnz + qsplit_target - 1) / qsplit_target;
             TORCH_CHECK(
                 work_capacity > 0 && work_capacity <= INT_MAX,
-                "Phase4-B q-range split worklist exceeds int grid range");
+                "SM90 KV-centric q-range split worklist exceeds int grid range");
             worklist = torch::zeros(
                 {work_capacity, kWorkRecordInts},
                 col_nnz.options().dtype(at::kInt));

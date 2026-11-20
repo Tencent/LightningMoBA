@@ -1,64 +1,20 @@
-"""Block-sparse threshold attention: pooled-K selection, then attend survivors.
+"""Triton pooled-key routing and a row-centric attention reference.
 
-Design follows the LightningMoBA dynamic-threshold router (sink/window anchors
-on a 128-token grid, one alpha per head, exact row maximum) but carries it
-through to the attention output instead of stopping at a selection mask.
+Selection and anchors use logical blocks of ``block`` tokens. The public block8
+interface uses block=8, sink=1 and window=2: the first 8-token block, the query's
+current block and its preceding block are forced, with a causal mask applied
+when attending to individual tokens. The 128-token length-alignment constraint
+in this module does not define the anchor grid.
 
-Three stages, two kernels:
+Mean pooling produces one key per logical block. Selection computes a maximum
+over eligible pooled-key scores, then emits a per-row bitmask using the
+row maximum plus logalpha, including forced blocks. These internal helpers
+accept per-head logalpha; the public block8 API broadcasts a scalar alpha.
 
-  pool      mean-pool K over blocks. Shared by both selectors, done once.
-  select    score Q against pooled K, take the exact row maximum over eligible
-            columns, emit a per-row keep bitmask and a per-row-block union mask.
-            Scoring costs 1/BLOCK of a causal QK pass, twice (the row maximum
-            must be known before the threshold can be applied), so 2/BLOCK.
-  attend    walk the union, skip untouched blocks, mask per row inside the tile.
-
-Cost in units of one full causal QK pass, where dense is 1 QK + 1 AV = 2.0:
-
-  total = 2/BLOCK + 2 * r,   r = keys attended / (S/2)
-
-r is *not* the token budget. A program covers BLOCK_M rows and must attend the
-union of what they picked, and fine-grained selections barely overlap, so the
-union is several times the per-row cost.
-
-Measured on Qwen3-4B layer 18, real post-RoPE q/k at 64K, 2048-token budget,
-H200, against dense FlashAttention at 360 TFLOPS. Alpha is calibrated per head
-to the budget (profile_stages.py, BLOCK=128, ATTEND_N=128):
-
-  BLOCK_M   select   attend   attend efficiency   tiles visited   speedup
-       16    6.8ms  141.8ms               15.4%           22.2%     0.659x
-       32    5.1ms  174.2ms               17.7%           31.5%     0.546x
-       64    6.7ms  447.3ms               22.2%           45.1%     0.485x
-      128    6.5ms 1037.5ms               13.4%           63.4%     0.211x
-
-Selection is not the problem: it is 1.5-5% of the runtime, and `tiles visited`
-matches the layout study exactly, so the arithmetic is as designed. The attend
-stage is the problem, and the reason is structural rather than a missing
-optimisation.
-
-A row-centric tile loads a K/V block once and reuses it across BLOCK_M rows, so
-its arithmetic intensity is about BLOCK_M FLOP per byte of K/V traffic. Dense
-FlashAttention runs BLOCK_M=128 and sits near 128; the H200 roofline turns over
-around 206. This kernel needs a small BLOCK_M to keep the union tight, which
-pins it in the memory-bound regime: 16 FLOP/byte against dense's 128 is an 8x
-handicap, and 1/0.154 measures 6.5x. The two requirements are in direct
-conflict and no amount of tuning inside this layout resolves it. ATTEND_N does
-not help either; widening it to 512 dropped efficiency to 5.7% while raising
-the visited fraction to 42%.
-
-The way out is to stop making BLOCK_M carry both roles. A column-centric (CSC)
-layout loads each key block once and gathers *every* query row that selected
-it, around 2048 rows here, which puts arithmetic intensity near 227 FLOP/byte
-and lands in the compute-bound regime. That is why LightningMoBA builds a CSC
-pattern rather than attending row block by row block, and the pieces already
-exist: lightning_moba/triton_dynamic_threshold.py emits col_offsets/col_nnz/
-csc_indices, and lightning_moba_varlen_func consumes them. The cost it pays is
-combining partial softmax results across key blocks, which that kernel already
-handles.
-
-This file is therefore the correct-but-memory-bound reference: it pins the
-selection semantics with an exact test suite and measures the layout's ceiling.
-Use it to validate a CSC implementation, not as the fast path.
+The block8 CSC backend reuses pooling and selection from this module. The
+row-centric reference instead walks the union of selected blocks in a query
+tile and applies each row's mask during attention. Neither is the block128
+SM90 pipeline exposed by lightning_moba_varlen_func.
 """
 import torch
 import triton
@@ -600,8 +556,9 @@ def block_threshold_attention(q, k, v, logalpha, block=128, block_m=64, km=None,
     q/k/v are [heads, seqlen, head_dim]; query heads must be a multiple of kv
     heads. logalpha holds one value per query head, at most zero: a block is
     kept when its pooled score reaches the row's pooled maximum plus logalpha,
-    or when it is an anchor. Anchors are the first 128 tokens, the row's own
-    128-token segment and the preceding one, clipped causally.
+    or when it is an anchor. Anchors are the first logical block, the query's
+    current block and the preceding block, each spanning `block` tokens;
+    individual token visibility is clipped causally.
 
     `cap` bounds how many blocks any single row may select. A head's alpha is
     calibrated to a mean token budget and says nothing about the tail, so one

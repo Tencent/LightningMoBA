@@ -83,7 +83,7 @@ def main():
     # Legacy block128 dense selection regression: select every KV block.
     q=torch.randn(512,4,128,device='cuda',dtype=torch.bfloat16);k=torch.randn(512,1,128,device='cuda',dtype=q.dtype);v=torch.randn_like(k)
     cu=torch.tensor([0,512],device='cuda',dtype=torch.int32)
-    out=lightning_moba.lightning_moba_varlen_func(q,k,v,cu,cu,512,512,128,4,causal=True)
+    out=lightning_moba.lightning_moba_topk_varlen_func(q,k,v,cu,cu,512,512,128,4,causal=True)
     expected=torch.nn.functional.scaled_dot_product_attention(q.transpose(0,1)[None],k.transpose(0,1)[None],v.transpose(0,1)[None],is_causal=True,enable_gqa=True)[0].transpose(0,1)
     torch.testing.assert_close(out.float(),expected.float(),atol=.035,rtol=.03)
     print(f'{cases} block8 package cases + {len(invalid)} invalid-input checks + legacy block128 regression passed',flush=True)

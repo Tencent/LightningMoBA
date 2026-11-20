@@ -93,10 +93,13 @@ if not SKIP_CUDA_BUILD:
         if bare_metal_version >= Version("11.8") and "90" in cuda_archs():
             cc_flag.append("-gencode")
             cc_flag.append("arch=compute_90,code=sm_90")
-        if bare_metal_version >= Version("12.0") and "90a" in cuda_archs():
+        if "90a" in cuda_archs():
+            if bare_metal_version < Version("12.3"):
+                raise RuntimeError("The default SM90 pipeline requires CUDA 12.3+ for modifiable TMA descriptors")
             # Hopper architecture-specific target required by WGMMA instructions.
             cc_flag.append("-gencode")
             cc_flag.append("arch=compute_90a,code=sm_90a")
+            cc_flag.append("-DLIGHTNING_MOBA_SM90_PIPELINE_AVAILABLE=1")
             cc_flag.append("-DCUTLASS_ARCH_MMA_SM90_SUPPORTED=1")
             # CUDA 12.6 does not consistently surface
             # __CUDA_ARCH_FEAT_SM90_ALL for this extension's mixed SM80/SM90a
@@ -173,7 +176,7 @@ if not SKIP_CUDA_BUILD:
                 # KV-Centric forward kernels
                 "csrc/lightning_moba/src/flash_kvcentric_worklist.cu",
                 "csrc/lightning_moba/src/flash_kvcentric_stream.cu",
-                "csrc/lightning_moba/src/flash_sm90_phase4b_csc_pipe.cu",
+                "csrc/lightning_moba/src/sm90_kv_centric_pipeline.cu",
                 "csrc/lightning_moba/src/lightning_moba_fwd_kvcentric_hdim128_bf16_causal_sm80.cu",
                 "csrc/lightning_moba/src/lightning_moba_fwd_kvcentric_hdim128_bf16_sm80.cu",
                 "csrc/lightning_moba/src/lightning_moba_fwd_kvcentric_hdim128_fp16_causal_sm80.cu",
