@@ -1,6 +1,6 @@
 # LightningMoBA
 
-[Paper](https://arxiv.org/abs/2611.26268) | [Citation](#citation)
+[Paper](https://arxiv.org/abs/2611.26268) | [Main Results](#main-results) | [Installation](#2-installation) | [Usage](#usage) | [Benchmarks](#routing-sweep-table-4-protocol) | [Citation](#citation)
 
 LightningMoBA co-designs dynamic routing, KV-centric execution, and runtime pipelining for long-context sparse attention. It replaces fixed per-query Top-K retention with threshold-based selection, groups selected queries by KV block with fanout-aware work partitioning, and overlaps data movement with Tensor Core computation on SM90 GPUs.
 
@@ -58,12 +58,21 @@ nvcc --version
 
 ### 2. Installation
 
-After installing CUDA-enabled PyTorch, run the following from the repository root:
+Clone the repository:
+
+```bash
+git clone https://github.com/Tencent/LightningMoBA.git
+cd LightningMoBA
+```
+
+With CUDA-enabled PyTorch installed in your active environment, install the build dependencies and compile the package from the repository root:
 
 ```bash
 python -m pip install setuptools wheel ninja packaging psutil
 MAX_JOBS=2 python -m pip install --no-build-isolation -e '.[test]'
 ```
+
+The `[test]` extra includes the test dependencies. Use the same Python environment for installation, examples, and tests.
 
 The package is imported as `lightning_moba`; its compiled extension is `lightning_moba_cuda`. The shared extension includes block8 CUDA attention, so there is no separate block8 library to compile at runtime.
 
@@ -76,6 +85,12 @@ python -c "import lightning_moba, lightning_moba_cuda; print(lightning_moba.__ve
 ```
 
 ## Usage
+
+**Choose the entry point for your task:**
+
+- **Paper's main method:** start with [Dynamic threshold routing (block 128)](#2-dynamic-threshold-routing-block-128). `lightning_moba_varlen_func` uses scalar `alpha` and the SM90 KV-centric pipeline.
+- **Fixed-budget comparison or backward support:** use the [Fixed Top-K baseline path](#1-fixed-top-k-baseline-path), exposed as `lightning_moba_topk_varlen_func` with `moba_topk`.
+- **Fine-grained selection:** use the separate [block8 interface](#3-dynamic-threshold-block8-attention); its settings and performance are not interchangeable with the paper's block128 experiments.
 
 Inputs use token-major layout: Q has shape `[total_q, query_heads, head_dim]`, and K/V have shape `[total_k, kv_heads, head_dim]`. Q/K/V must use compatible floating-point dtypes on the same CUDA device, and `query_heads` must be divisible by `kv_heads`. Packed variable-length inputs use contiguous CUDA `int32` cumulative-length tensors.
 
